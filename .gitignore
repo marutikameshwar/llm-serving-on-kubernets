@@ -1,0 +1,32 @@
+# Environments & virtualenvs
+.venv/
+venv/
+ENV/
+__pycache__/
+*.pyc
+
+# Secrets & Local Configs
+.env
+*.secret.yaml
+secrets/
+*.kubeconfig
+kubeconfig
+
+# Model weights & Large artifacts
+models/
+cache/
+*.bin
+*.pt
+*.safetensors
+*.onnx
+
+# Helm & K8s artifacts
+*.tgz
+charts/*/charts/
+charts/*/tmpcharts/
+
+# OS & IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
