@@ -101,5 +101,88 @@ When you run an LLM on Kubernetes, there are three distinct layers that must coo
 
 ---
 
-*(Next up: Part 1.2 — Cluster Bootstrapping Script & GPU Operator Configuration)*
+## Part 1.2: Cluster Bootstrapping Script & GPU Operator Configuration
+
+### 1. What Did We Build & Why?
+We created three foundational artifacts on our laptop before spinning up the paid GPU VM:
+1. **`scripts/setup-gpu-vm.sh`**: An automated, idempotent bash script that installs k3s, Helm, the NVIDIA Container Toolkit, and the NVIDIA GPU Operator.
+2. **`k8s/base/namespace.yaml`**: The isolated `llm-serving` Kubernetes namespace for our workloads.
+3. **`k8s/base/cuda-vector-add.yaml`**: A GPU smoke-test Kubernetes Job that runs tensor vector addition to prove hardware scheduling works before we touch vLLM.
+
+**The Engineering Problem Solved**:
+Manually running `apt install` and `helm install` commands directly on a cloud VM is error-prone, untracked, and non-reproducible. More importantly, cloud GPU instances (like RunPod, Lambda Labs, GCP, AWS) come with proprietary NVIDIA drivers pre-installed in the Linux kernel. A naive installation of the NVIDIA GPU Operator attempts to compile and overwrite host drivers, causing kernel panics or device plugin failure. Our automated script solves this by configuring k3s containerd to use the host drivers cleanly.
+
+---
+
+### 2. How Did We Build It? (Step-by-Step Anatomy of `setup-gpu-vm.sh`)
+
+Here is what happens under the hood when this script runs:
+
+```
+[ Step 1: nvidia-smi Check ]
+       │  Verifies host driver is active and GPU is detected on PCIe bus
+       ▼
+[ Step 2: NVIDIA Container Toolkit ]
+       │  Installs nvidia-ctk and generates CDI (Container Device Interface) spec
+       ▼
+[ Step 3: k3s Containerd Template ]
+       │  Writes /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+       │  Injects [plugins.cri.containerd.runtimes.nvidia] runtime binary
+       ▼
+[ Step 4: Install k3s Lightweight K8s ]
+       │  Disables default Traefik/ServiceLB to save CPU/RAM for inference
+       ▼
+[ Step 5: Install Helm 3 ]
+       │  Standard package manager for Kubernetes operators
+       ▼
+[ Step 6: Deploy NVIDIA GPU Operator via Helm ]
+       │  --set driver.enabled=false    (Do NOT overwrite host driver)
+       │  --set toolkit.enabled=false   (Use host containerd template)
+       │  --set devicePlugin.enabled=true (Exposes nvidia.com/gpu to Kubelet)
+       │  --set dcgmExporter.enabled=true (Exposes GPU metrics to Prometheus)
+       ▼
+[ Result: Node Allocatable nvidia.com/gpu: 1 ]
+```
+
+---
+
+### 3. Deep Dive Concepts (Interview Essentials)
+
+#### Concept A: Why `config.toml.tmpl` instead of editing `config.toml` directly?
+In standard Kubernetes (kubeadm), containerd is managed via `/etc/containerd/config.toml`.  
+In **k3s**, containerd is embedded and self-managed. Every time k3s boots or restarts, it **completely regenerates** `/var/lib/rancher/k3s/agent/etc/containerd/config.toml` from internal Go templates.  
+If you edit `config.toml` directly, k3s will overwrite your changes on the next restart, wiping out the NVIDIA runtime!  
+*The Solution*: k3s looks for a template file named `config.toml.tmpl`. If present, k3s executes this template. By defining `nvidia-container-runtime` in `config.toml.tmpl`, our GPU runtime survives reboots and upgrades permanently.
+
+#### Concept B: Why `driver.enabled=false` in the GPU Operator?
+* The NVIDIA GPU Operator was originally designed for bare-metal enterprise clusters where the host OS has NO drivers installed. In that mode, the operator deploys a DaemonSet that compiles kernel modules (`nvidia.ko`) against the host Linux kernel.
+* On **cloud GPU VMs** (AWS, GCP, RunPod, Lambda), the cloud hypervisor and base image already have driver modules loaded into the running kernel.
+* If you run the GPU Operator with `driver.enabled=true`, the operator will attempt to load its own kernel modules, causing an immediate kernel crash or module busy lock. Setting `driver.enabled=false` instructs the operator to skip driver installation and hook directly into the existing host driver.
+
+#### Concept C: How Kubernetes Discovers GPUs (The Device Plugin API)
+Standard Kubernetes only understands two hardware resources out of the box: **CPU** (`cpu`) and **Memory** (`memory`). Kubernetes does not natively understand GPUs!  
+To support GPUs, Kubernetes uses **Extended Resources** via the **Device Plugin Framework**:
+1. The GPU Operator runs the `nvidia-device-plugin` DaemonSet on the node.
+2. The device plugin calls NVML (NVIDIA Management Library) to discover physical GPUs on the machine.
+3. The device plugin registers with the local node's `kubelet` over a Unix domain socket (`/var/lib/kubelet/device-plugins/kubelet.sock`).
+4. It announces: *"I have 1 healthy `nvidia.com/gpu` available."*
+5. The kubelet updates its node status (`status.allocatable['nvidia.com/gpu'] = 1`), sending this capacity to the Kubernetes API server.
+6. Now, any pod with `resources.limits: { nvidia.com/gpu: 1 }` can be scheduled to that node!
+
+---
+
+### 4. Interview Questions & Model Answers
+
+#### Q1: "How does Kubernetes schedule and allocate a physical GPU to a specific container?"
+> **Model Answer**:
+> *"Kubernetes uses the Device Plugin framework for extended resources. The NVIDIA Device Plugin runs as a DaemonSet on GPU nodes, scans the PCIe bus via NVML, and reports allocatable `nvidia.com/gpu` counts to the kubelet. When a pod requests `nvidia.com/gpu: 1`, the Kubernetes kube-scheduler matches the pod to a node with available GPU capacity and decrements the allocatable count. The kubelet then invokes the device plugin's `Allocate()` gRPC method, which returns the environment variables and host device paths (e.g. `/dev/nvidia0`). The container runtime (containerd with NVIDIA Container Toolkit) uses these device paths to mount the physical GPU into the container's Linux cgroup and namespace."*
+
+#### Q2: "What is the Container Device Interface (CDI) and why is the industry moving to it from legacy hooks?"
+> **Model Answer**:
+> *"Legacy GPU container injection relied on pre-start hooks in Docker/containerd that inspected container environment variables (like `NVIDIA_VISIBLE_DEVICES`) and mutated container specs on the fly. This was brittle and tightly coupled to specific runtime implementations. CDI (Container Device Interface) is an open specification from the Container Orchestrated Device (COD) working group that standardizes how third-party devices (GPUs, FPGAs, TPUs) are described via static YAML files under `/etc/cdi/`. Runtimes like containerd and CRI-O can read CDI specs directly, eliminating proprietary hacks and enabling cleaner, more secure multi-device scheduling."*
+
+---
+
+*(Next up: Part 1.3 — GPU Cluster Bootstrapping & Validation on Cloud VM)*
+
 

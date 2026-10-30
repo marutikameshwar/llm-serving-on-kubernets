@@ -27,3 +27,4 @@ To ensure full reproducibility and avoid the notorious "works on my machine" or 
 | **INT4 AWQ** | `Qwen/Qwen2.5-7B-Instruct-AWQ` | 4,096 tokens (pinned) | ~5.3 GB |
 | **INT4 GPTQ** | `Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4` | 4,096 tokens (pinned) | ~5.2 GB |
 | **FP8 (Hopper)** | `neuralmagic/Qwen2.5-7B-Instruct-FP8` | 4,096 tokens (pinned) | ~7.8 GB |
+

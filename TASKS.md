@@ -163,7 +163,7 @@ llm-serving-k8s/
 ---
 
 ### Part 1.2: Cluster Bootstrapping Script & GPU Operator Configuration
-- [ ] **Part 1.2**
+- [x] **Part 1.2**
   - **Goal**: Write an idempotent bash setup script to install k3s, Helm, and configure the NVIDIA GPU Operator without conflicting with host GPU drivers.
   - **Learn**:
     - NVIDIA GPU Operator Architecture & Driver options: [NVIDIA GPU Operator Documentation](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/index.html)

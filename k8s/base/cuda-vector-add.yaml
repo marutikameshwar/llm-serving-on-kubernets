@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cuda-vector-add
+  namespace: llm-serving
+  labels:
+    app.kubernetes.io/name: cuda-vector-add
+    app.kubernetes.io/part-of: llm-serving-k8s
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cuda-vector-add
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: cuda-vector-add
+        image: nvcr.io/nvidia/k8s/cuda-sample:vectoradd-cuda12.5.0-ubuntu22.04
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            cpu: "1"
+            memory: 1Gi
+          requests:
+            nvidia.com/gpu: 1
+            cpu: "500m"
+            memory: 512Mi
