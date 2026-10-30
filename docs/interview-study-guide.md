@@ -28,7 +28,36 @@ By pinning every version upfront in an IaC registry, we make our infrastructure 
 
 ---
 
-### 2. Core Concepts Explained Simply
+### 2. Foundational Principles & Official References (Why They Matter in Interviews)
+
+#### Principle A: The Twelve-Factor App — Rule II: Explicit Dependencies
+* **Official Reference**: [12factor.net/dependencies](https://12factor.net/dependencies)
+* **What it means**: An application or infrastructure stack must explicitly declare and pin all dependencies; it must never rely on implicit system-wide packages or `:latest` floating tags.
+* **Why it matters in AI Infrastructure**:
+  * In web engineering, pulling `:latest` might break an API response. In AI infrastructure, pulling `vllm/vllm-openai:latest` can silently download an image built against CUDA 12.6 when your host driver only supports CUDA 12.2. The container will crash at runtime with `CUDA initialization error: no kernel image is available for execution on the device`.
+  * By maintaining an explicit version registry (`docs/versions.md`), our cluster deployment is 100% deterministic, immutable, and reproducible.
+
+#### Principle B: Kubernetes Directory Architecture & Object Separation
+* **Official Reference**: [Kubernetes Concepts: Working with Objects](https://kubernetes.io/docs/concepts/overview/working-with-objects/)
+* **What it means**: Structuring manifests hierarchically so that static foundational layers (namespaces, storage classes, secrets) are decoupled from dynamic workloads (deployments, jobs) and telemetry.
+* **Why it matters in AI Infrastructure**:
+  * LLM serving involves heavy persistent storage (multi-gigabyte weights) and dedicated device plugins. Dumping everything into a single YAML or random files causes race conditions where a pod starts before its PersistentVolumeClaim or driver daemon is ready.
+  * Our repo layout (`k8s/base/`, `k8s/vllm/`, `monitoring/`, `benchmarks/`) mirrors production enterprise GitOps repositories.
+
+---
+
+### 3. What Each Project File Does & Why It Exists
+
+| File Path | Role in the Project | Why an Interviewer Cares |
+| :--- | :--- | :--- |
+| **`docs/versions.md`** | The Single Source of Truth for pinned software versions (Ubuntu, k3s, vLLM, CUDA, GPU Operator, GuideLLM). | Demonstrates dependency discipline and deep awareness of CUDA driver/runtime compatibility constraints. |
+| **`.agent/rules/engineering-standards.md`** | Production rulebook enforcing no secrets in git, `/dev/shm` sizing, health probes, and resource requests/limits. | Proves you know the common failure modes of containerized deep learning (e.g., PyTorch shared memory bus errors, unprobed pod traffic). |
+| **`docs/notes.md`** | Chronological engineering decision log capturing trade-offs at each step. | Shows structured engineering thinking: why we picked specific architectures, models, and tools rather than just copying tutorials. |
+| **`docs/interview-study-guide.md`** | Living pre-interview study guide with deep architectural breakdowns, hardware math, and interview Q&As. | Serves as your personal revision sheet so you can explain any system component with high clarity and authority. |
+
+---
+
+### 4. Core Concepts Explained Simply
 
 #### Concept A: The GPU Software Stack (The "Three-Layer Cake")
 When you run an LLM on Kubernetes, there are three distinct layers that must cooperate:
@@ -60,7 +89,7 @@ When you run an LLM on Kubernetes, there are three distinct layers that must coo
 
 ---
 
-### 3. Interview Questions & Model Answers
+### 5. Interview Questions & Model Answers
 
 #### Q1: "Why is version pinning more critical in GPU Kubernetes workloads than in standard CPU microservices?"
 > **Model Answer**:
@@ -73,3 +102,4 @@ When you run an LLM on Kubernetes, there are three distinct layers that must coo
 ---
 
 *(Next up: Part 1.2 — Cluster Bootstrapping Script & GPU Operator Configuration)*
+
