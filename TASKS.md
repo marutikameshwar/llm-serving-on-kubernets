@@ -24,6 +24,7 @@ llm-serving-k8s/
 │   ├── vllm/
 │   │   ├── deployment-fp16.yaml
 │   │   ├── deployment-awq.yaml
+│   │   ├── deployment-gptq.yaml
 │   │   ├── deployment-fp8.yaml
 │   │   ├── service.yaml
 │   │   └── configmap.yaml
@@ -45,6 +46,7 @@ llm-serving-k8s/
 │   ├── guidellm/
 │   │   ├── config-fp16.yaml
 │   │   ├── config-awq.yaml
+│   │   ├── config-gptq.yaml
 │   │   ├── config-fp8.yaml
 │   │   └── parse_results.py
 │   └── lm-eval/
@@ -99,6 +101,10 @@ llm-serving-k8s/
 | **INT4 AWQ** | 4 | — | — | — | — | — |
 | **INT4 AWQ** | 8 | — | — | — | — | — |
 | **INT4 AWQ** | 16 | — | — | — | — | — |
+| **INT4 GPTQ** | 1 | — | — | — | — | — |
+| **INT4 GPTQ** | 4 | — | — | — | — | — |
+| **INT4 GPTQ** | 8 | — | — | — | — | — |
+| **INT4 GPTQ** | 16 | — | — | — | — | — |
 | **FP8 (H100)** | 1 | — | — | — | — | — |
 | **FP8 (H100)** | 8 | — | — | — | — | — |
 | **FP8 (H100)** | 16 | — | — | — | — | — |
@@ -110,6 +116,7 @@ llm-serving-k8s/
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **FP16 Baseline** | 16 | 16 | 16 | — | — | — | — | — |
 | **INT4 AWQ** | 4 | 16 | 16 | — | — | — | — | — |
+| **INT4 GPTQ** | 4 | 16 | 16 | — | — | — | — | — |
 | **FP8 (Weights+Act)** | 8 | 8 | 16 | — | — | — | — | — |
 | **FP8 + FP8 KV Cache** | 8 | 8 | 8 | — | — | — | — | — |
 
@@ -132,7 +139,7 @@ llm-serving-k8s/
 > **Milestone Goal**: Establish a functional, observable, load-tested, and quantized LLM serving deployment on GPU Kubernetes that can immediately anchor an AI Infrastructure resume.
 
 ### Resume Checkpoint (v1 Core)
-> *"Engineered production LLM serving infrastructure on Kubernetes (k3s) for Qwen2.5-7B using vLLM and NVIDIA GPU Operator; optimized throughput to **[X]** tokens/sec across concurrency levels 1–16 and reduced VRAM by **[Y]%** via INT4 AWQ quantization while monitoring TTFT, ITL, and KV cache saturation in Prometheus/Grafana."*
+> *"Engineered production LLM serving infrastructure on Kubernetes (k3s) for Qwen2.5-7B using vLLM and NVIDIA GPU Operator; optimized throughput to **[X]** tokens/sec across concurrency levels 1–16 and reduced VRAM by **[Y]%** via 4-bit quantization (comparing INT4 AWQ vs INT4 GPTQ) while monitoring TTFT, ITL, and KV cache saturation in Prometheus/Grafana."*
 
 ---
 
@@ -283,21 +290,25 @@ llm-serving-k8s/
 
 ---
 
-### Part 1.9: Quantization Benchmark: INT4 AWQ Deployment & Evaluation
+### Part 1.9: Quantization Benchmark: 4-bit Quantization (INT4 AWQ vs. INT4 GPTQ)
 - [ ] **Part 1.9**
-  - **Goal**: Deploy `Qwen/Qwen2.5-7B-Instruct-AWQ`, run identical GuideLLM load tests, and contrast VRAM usage, TTFT, and token throughput against the FP16 baseline.
+  - **Goal**: Deploy both `Qwen/Qwen2.5-7B-Instruct-AWQ` and `Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4`, run identical GuideLLM load tests, and contrast VRAM usage, TTFT, and token throughput against the FP16 baseline.
   - **Learn**:
     - Activation-aware Weight Quantization (AWQ) concepts: [AWQ Paper](https://arxiv.org/abs/2306.00978)
-    - vLLM Quantization backends & kernel execution: [vLLM Quantization Docs](https://docs.vllm.ai/en/latest/features/quantization/supported_hardware.html)
+    - Accurate Post-Training Quantization for Generative Pre-trained Transformers (GPTQ): [GPTQ Paper](https://arxiv.org/abs/2210.17323)
+    - vLLM Quantization backends & kernel execution (Marlin, AWQ, and GPTQ kernels): [vLLM Quantization Docs](https://docs.vllm.ai/en/latest/features/quantization/supported_hardware.html)
   - **Build**:
     - `k8s/vllm/deployment-awq.yaml`
+    - `k8s/vllm/deployment-gptq.yaml`
     - `benchmarks/guidellm/config-awq.yaml`
+    - `benchmarks/guidellm/config-gptq.yaml`
   - **Where**: Laptop (draft) -> GPU VM (run)
-  - **Run**: Switch vLLM deployment to AWQ image/model, rerun GuideLLM job, collect metrics.
-  - **Verify**: Quantization table filled for INT4 AWQ; confirm VRAM reduction from ~15GB to ~5GB.
+  - **Run**: Deploy AWQ and GPTQ variants sequentially, rerun GuideLLM job, collect metrics.
+  - **Verify**: Quantization table filled for both INT4 AWQ and INT4 GPTQ; verify VRAM reduction from ~15GB to ~5GB and compare throughput.
   - **Explain-back**:
-    1. Why does weight-only INT4 quantization reduce memory footprint by ~3x but may not always speed up low-batch inference?
-    2. Under what workload conditions (batch size, sequence length) does INT4 AWQ outperform FP16 in raw throughput?
+    1. How do AWQ (protecting salient weights by activation magnitude) and GPTQ (second-order error compensation via inverse Hessian) differ fundamentally in their quantization math?
+    2. What are the Marlin optimized kernels in vLLM, and how do they accelerate 4-bit matrix multiplication?
+    3. Why does weight-only INT4 quantization reduce memory footprint by ~3x but may not always speed up low-batch inference?
 
 ---
 
@@ -315,7 +326,7 @@ llm-serving-k8s/
   - **Verify**: GitHub renders README cleanly with working diagrams, tables, and links; resume bullet is ready for applications.
   - **Explain-back**:
     1. Walk through the life of an inference request from HTTP ingress to GPU tensor execution in this cluster.
-    2. How would you justify your choice between FP16 and INT4 AWQ to an engineering manager based on your data?
+    2. How would you justify your choice between FP16, INT4 AWQ, and INT4 GPTQ to an engineering manager based on your latency and throughput data?
 
 ---
 
@@ -330,7 +341,7 @@ llm-serving-k8s/
 
 ### Part 2.1: Accuracy Evaluation with lm-evaluation-harness
 - [ ] **Part 2.1**
-  - **Goal**: Run `lm-evaluation-harness` against the vLLM OpenAI-compatible endpoint to quantify accuracy retention of INT4 AWQ versus FP16 on GSM8K and an MMLU subset.
+  - **Goal**: Run `lm-evaluation-harness` against the vLLM OpenAI-compatible endpoint to quantify accuracy retention of INT4 AWQ and INT4 GPTQ versus FP16 on GSM8K and an MMLU subset.
   - **Learn**:
     - Evaluation methodologies for generative models: [lm-evaluation-harness Documentation](https://github.com/EleutherAI/lm-evaluation-harness)
     - Perplexity vs task-specific accuracy metrics in quantized models: [Quantization & Quality Tradeoffs](https://huggingface.co/docs/optimum/concept_guides/quantization)
@@ -339,11 +350,11 @@ llm-serving-k8s/
     - `benchmarks/lm-eval/run-eval.sh`
     - `benchmarks/lm-eval/parse_eval.py`
   - **Where**: Laptop (draft) -> GPU VM (run)
-  - **Run**: Execute lm-eval Job against FP16 and AWQ endpoints, log accuracy scores.
-  - **Verify**: Quantization table accuracy columns (GSM8K and MMLU) populated with real evaluation scores.
+  - **Run**: Execute lm-eval Job against FP16, AWQ, and GPTQ endpoints, log accuracy scores.
+  - **Verify**: Quantization table accuracy columns (GSM8K and MMLU) populated with real evaluation scores for FP16, AWQ, and GPTQ.
   - **Explain-back**:
     1. Why is human eval or synthetic load testing insufficient to approve a quantized model for production deployment?
-    2. Which model tasks (e.g., math reasoning vs knowledge retrieval) typically degrade first under INT4 quantization?
+    2. How did AWQ compare to GPTQ in preserving reasoning capability on GSM8K? Which method had less quality degradation?
 
 ---
 
