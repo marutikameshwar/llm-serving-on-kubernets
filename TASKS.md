@@ -144,7 +144,7 @@ llm-serving-k8s/
 ---
 
 ### Part 1.1: Local Repository Scaffolding & Version Registry
-- [ ] **Part 1.1**
+- [x] **Part 1.1**
   - **Goal**: Establish the repository directory structure, documentation files, and pin all software versions so every component is reproducible and documented.
   - **Learn**:
     - Infrastructure as code dependency pinning: [Twelve-Factor App: Dependencies](https://12factor.net/dependencies)
