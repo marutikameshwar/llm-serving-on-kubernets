@@ -786,16 +786,32 @@ In AI serving, naive health probes will kill your pod during model initializatio
 ---
 
 #### Client Script: `scripts/test-client.py`
-* **Architecture**: A streaming client implemented with Python's standard `urllib` library (zero external dependencies required).
-* **Protocol**: Uses **Server-Sent Events (SSE)** over HTTP:
-  ```text
-  data: {"id":"chat-123","choices":[{"delta":{"content":"Paged"}}]}
-  data: {"id":"chat-123","choices":[{"delta":{"content":"Attention"}}]}
-  data: [DONE]
-  ```
+* **Zero-Dependency Architecture**: Built using Python's standard library (`urllib.request`, `json`, `time`). It requires zero `pip install` commands, allowing it to execute reliably on any bastion host, CI/CD runner, or developer laptop without environment conflicts.
+* **Server-Sent Events (SSE) Streaming**:
+  * Instead of waiting for a full 256-token response to complete (which introduces a 5-10 second perceived delay), the client passes `"stream": True`.
+  * The server holds the HTTP connection open and streams partial JSON payloads line-by-line using SSE:
+    ```text
+    data: {"choices":[{"delta":{"content":"Paged"}}]}
+    data: {"choices":[{"delta":{"content":"Attention"}}]}
+    data: [DONE]
+    ```
+  * The client strips the `data: ` prefix, parses the JSON delta, and invokes `sys.stdout.flush()` to render real-time typewriter output.
 * **Telemetry Calculated**:
-  * **Time to First Token (TTFT)**: Elapsed milliseconds from sending the request to the arrival of the very first token chunk.
-  * **Throughput**: Calculated as $\frac{\text{Generated Tokens}}{\text{Generation Time}}$ (tokens/second).
+  * **Time to First Token (TTFT)**:
+    $$\text{TTFT (ms)} = (t_{\text{first\_token}} - t_{\text{request\_sent}}) \times 1000$$
+    Measures the prompt prefill latency (how fast the GPU digests your input prompt before generating new tokens).
+  * **Generation Throughput**:
+    $$\text{Throughput (tok/s)} = \frac{\text{Total Generated Tokens}}{t_{\text{completion}} - t_{\text{first\_token}}}$$
+    Measures the pure decode phase speed of the model.
+* **Usage Command**:
+  ```bash
+  # Inside cluster / on VM:
+  python3 scripts/test-client.py --prompt "Explain PagedAttention."
+
+  # From local laptop via Kubernetes port-forward:
+  kubectl port-forward svc/vllm-service 8000:8000 -n llm-serving
+  python scripts/test-client.py
+  ```
 
 ---
 
