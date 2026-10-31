@@ -169,6 +169,41 @@ To support GPUs, Kubernetes uses **Extended Resources** via the **Device Plugin 
 5. The kubelet updates its node status (`status.allocatable['nvidia.com/gpu'] = 1`), sending this capacity to the Kubernetes API server.
 6. Now, any pod with `resources.limits: { nvidia.com/gpu: 1 }` can be scheduled to that node!
 
+#### Concept D: Why Can't the GPU Driver Live Inside Docker? (Kernel vs. User Space)
+In web development, the classic Docker promise is: *"Everything is containerized—the host OS doesn't matter!"*  
+In GPU AI infrastructure, this is **physically impossible**.
+* **Containers are NOT Virtual Machines**: Containers do not run their own OS kernel; they are isolated processes sharing the host Linux kernel.
+* **Kernel Space (Ring 0) vs. User Space (Ring 3)**:
+  * Talking to physical GPU hardware across the PCIe bus requires kernel-level direct memory access (DMA) and hardware interrupts. This is handled exclusively by **NVIDIA Kernel Modules** (`nvidia.ko`, `nvidia-uvm.ko`) running in the host kernel.
+  * Containers live in user space. A container cannot load or compile kernel modules into the host kernel without destroying container security boundaries.
+* **The Division of Labor**:
+  ```text
+  ┌──────────────────────────────────────────────────────────────┐
+  │  INSIDE THE DOCKER CONTAINER (User Space)                    │
+  │  • Python (vLLM, PyTorch, Transformers)                      │
+  │  • CUDA Runtime (libcudart.so) & Math Libs (cuBLAS, cuDNN)   │
+  └──────────────────────────────┬───────────────────────────────┘
+                                 │ Talks via mounted /dev/nvidia0
+  ═══════════════════════════════╪════════════════════════════════ Container Boundary
+                                 │
+  ┌──────────────────────────────┴───────────────────────────────┐
+  │  ON THE HOST LINUX VM (Kernel Space)                         │
+  │  • Host Linux Kernel                                         │
+  │  • NVIDIA Kernel Modules (nvidia.ko, nvidia-uvm.ko)          │
+  │  • CUDA Driver Library (libcuda.so.1)                        │
+  └──────────────────────────────┬───────────────────────────────┘
+                                 │ Physical PCIe Bus
+  ┌──────────────────────────────┴───────────────────────────────┐
+  │  PHYSICAL HARDWARE: NVIDIA L4 / A10 / H100 Silicon & VRAM   │
+  └──────────────────────────────────────────────────────────────┘
+  ```
+* **The Bridge**: The **NVIDIA Container Toolkit** acts as the bridge. At container startup, it hooks into containerd, mounts the character devices (`/dev/nvidia*`), and links `libcuda.so` directly into the container.
+
+#### Concept E: Why Bootstrap with an `.sh` Script instead of Manual Terminal Commands?
+1. **Cost Efficiency & Rapid Recreation**: Cloud GPU instances are rented by the hour. When we shut down a VM to save money, spinning up a new one tomorrow takes **1 command** (`bash scripts/setup-gpu-vm.sh`) in 3 minutes, rather than 45 minutes of manual error-prone copy-pasting.
+2. **Fail-Fast Safety (`set -euo pipefail`)**: If an `apt` package or network curl fails in a manual terminal session, subsequent commands run blindly on a broken machine. With `set -e`, execution halts immediately at the first failure.
+3. **Executable Documentation for Interviews**: Interviewers looking at your repository see clean, version-controlled Infrastructure-as-Code proving you know how to automate containerd and GPU drivers.
+
 ---
 
 ### 4. Interview Questions & Model Answers
@@ -180,6 +215,14 @@ To support GPUs, Kubernetes uses **Extended Resources** via the **Device Plugin 
 #### Q2: "What is the Container Device Interface (CDI) and why is the industry moving to it from legacy hooks?"
 > **Model Answer**:
 > *"Legacy GPU container injection relied on pre-start hooks in Docker/containerd that inspected container environment variables (like `NVIDIA_VISIBLE_DEVICES`) and mutated container specs on the fly. This was brittle and tightly coupled to specific runtime implementations. CDI (Container Device Interface) is an open specification from the Container Orchestrated Device (COD) working group that standardizes how third-party devices (GPUs, FPGAs, TPUs) are described via static YAML files under `/etc/cdi/`. Runtimes like containerd and CRI-O can read CDI specs directly, eliminating proprietary hacks and enabling cleaner, more secure multi-device scheduling."*
+
+#### Q3: "Why must the NVIDIA GPU driver be installed on the host operating system rather than containerized inside Docker?"
+> **Model Answer**:
+> *"Containers share the host operating system kernel and run in unprivileged user space. Interfacing with physical GPU silicon across the PCIe bus requires memory-mapped I/O and interrupt handling, which can only be performed in kernel space (Ring 0) by the NVIDIA kernel modules (`nvidia.ko` and `nvidia-uvm.ko`). Because containers cannot load kernel modules into the host kernel, the driver must reside on the host. The container only packages the high-level CUDA runtime and application frameworks, while the NVIDIA Container Toolkit dynamically mounts the host's device nodes (`/dev/nvidia*`) and driver library (`libcuda.so`) into the container at start time."*
+
+#### Q4: "How did you manage host bootstrapping and node repeatability for your GPU cluster?"
+> **Model Answer**:
+> *"I automated the host configuration using an idempotent bash bootstrapping script pinned with `set -euo pipefail`. Because cloud GPU VMs come with proprietary kernel drivers preinstalled, the script automatically generates a k3s containerd template for the `nvidia-container-runtime`, installs k3s without redundant ingress components, and uses Helm to deploy the NVIDIA GPU Operator with `driver.enabled=false`. This allowed me to recreate the entire GPU cluster from scratch in under 3 minutes whenever a new VM was provisioned."*
 
 ---
 
