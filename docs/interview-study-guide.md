@@ -665,6 +665,44 @@ In Part 1.4, we engineered the production core: the long-running vLLM serving en
 
 ---
 
+#### The PyTorch 64 MB `/dev/shm` Trap Explained (The Whiteboard Analogy)
+
+##### 1. What is `/dev/shm`?
+* In Linux, `shm` stands for **Shared Memory**.
+* Normally, writing files goes to an SSD hard drive (slow, hundreds of MB/s).
+* `/dev/shm` is a virtual directory mounted directly inside **physical RAM** (a *tmpfs*). Reading and writing to `/dev/shm` happens at memory-bus speeds (tens of gigabytes per second).
+
+##### 2. Why Does PyTorch Need `/dev/shm`? (The Whiteboard vs. Mailing Letters)
+Because of Python's Global Interpreter Lock (GIL), PyTorch spawns multiple worker processes for tokenization, data loading, and GPU tensor dispatch:
+* **The Slow Way (Mailing Letters)**: Process A serializes (pickles) a tensor into raw bytes and sends it through a network socket to Process B. This wastes massive CPU cycles and adds latency.
+* **The Fast Way (The Shared Whiteboard in RAM)**: Process A writes the tensor directly onto the shared memory whiteboard (`/dev/shm`). Process B reads the memory address directly. Zero memory copying, zero serialization latency!
+
+##### 3. The 64MB Docker Bug & `SIGBUS` Crash
+* In 2013, Docker hardcoded the default size of `/dev/shm` to **64 Megabytes** for lightweight web servers.
+* In deep learning, an inference batch or token embedding tensor easily exceeds 100MB.
+* When PyTorch writes to `/dev/shm` and crosses 64MB, the Linux kernel says: *"No space left on device!"*
+* The kernel sends an uncatchable **`SIGBUS` (Signal: Bus Error)**, instantly crashing the Python container:
+  ```text
+  RuntimeError: DataLoader worker (pid 142) is killed by signal: Bus error.
+  It is possible that dataloader's workers ran out of shared memory. 
+  Please reach out to system admin to increase shared memory (/dev/shm).
+  ```
+
+##### 4. The Kubernetes Production Fix
+In `deployment-fp16.yaml`, we mount an `emptyDir` volume backed by RAM:
+```yaml
+volumes:
+- name: dshm
+  emptyDir:
+    medium: Memory        # Backed by RAM, not SSD!
+    sizeLimit: 4Gi        # Expands shared memory from 64MB to 4,096MB (64x increase)
+volumeMounts:
+- name: dshm
+  mountPath: /dev/shm
+```
+
+---
+
 #### Manifest A: `k8s/vllm/deployment-fp16.yaml`
 
 ```yaml
