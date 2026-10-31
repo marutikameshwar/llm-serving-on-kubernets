@@ -574,7 +574,93 @@ To decouple model weight storage from the fragile container lifecycle, Kubernete
 
 ---
 
-*(Next up: Part 1.3 — Model Cache Storage & Secrets Manifests [Laptop])*
+### 11. Manifest Deep Dive: `model-cache-pvc.yaml` & `hf-secret.template.yaml` (Part 1.3)
+
+---
+
+#### Manifest A: `k8s/base/model-cache-pvc.yaml`
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache-pvc
+  namespace: llm-serving
+  labels:
+    app.kubernetes.io/name: model-cache
+    app.kubernetes.io/part-of: llm-serving-k8s
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 50Gi
+```
+
+##### Line-by-Line Breakdown:
+* `apiVersion: v1`: Storage claims are core Kubernetes resources in the `v1` API group.
+* `kind: PersistentVolumeClaim`: An authorization ticket/request for storage. Decouples the pod from the underlying cloud hardware (whether local SSD, AWS EBS, or Ceph).
+* `metadata.name: model-cache-pvc`: The handle that our vLLM deployment will reference in its `volumes` array.
+* `metadata.namespace: llm-serving`: Bound to our isolated project namespace.
+* `spec.accessModes: [ReadWriteOnce]`:
+  * **ReadWriteOnce (RWO)**: The volume can be mounted with read-write permissions by **a single Kubernetes node** at a time.
+  * *Why RWO?* Our single GPU VM runs all pods on that one machine. Local NVMe SSD storage is inherently node-local and offers the maximum sequential read speed (3,000–7,000 MB/s), which is crucial for fast model weight loading.
+  * *(Interview Note)*: If we had a 100-node cluster sharing a centralized weight cache, we would use **ReadWriteMany (RWX)** via a distributed file system like NFS, CephFS, or AWS EFS.
+* `spec.storageClassName: local-path`:
+  * Directs Kubernetes to use k3s’s built-in **Rancher Local Path Provisioner**.
+  * Dynamically creates a persistent host directory at `/var/lib/rancher/k3s/storage/` on the host VM's NVMe drive.
+* `spec.resources.requests.storage: 50Gi`:
+  * Carves out **50 Gibibytes** ($50 \times 1024^3$ bytes).
+  * *Storage Budget*:
+    * Qwen2.5-7B FP16: **~15.2 GB**
+    * Qwen2.5-7B INT4 AWQ: **~5.3 GB**
+    * Qwen2.5-7B INT4 GPTQ: **~5.2 GB**
+    * Total for all 3 models = **~25.7 GB**, leaving $> 24\text{ GB}$ of buffer for tokenizer configs, temporary staging files, and OS overhead.
+
+---
+
+#### Manifest B: `k8s/base/hf-secret.template.yaml`
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hf-secret
+  namespace: llm-serving
+  labels:
+    app.kubernetes.io/name: hf-secret
+    app.kubernetes.io/part-of: llm-serving-k8s
+type: Opaque
+stringData:
+  HF_TOKEN: "PASTE_YOUR_HUGGING_FACE_TOKEN_HERE"
+```
+
+##### Line-by-Line Breakdown:
+* `kind: Secret`: Stores sensitive authentication data securely in the Kubernetes etcd/SQLite database rather than plaintext manifest configs.
+* `type: Opaque`: The standard, default Kubernetes secret type for arbitrary user-defined key-value strings (passwords, tokens, API keys).
+* `stringData`:
+  * Standard Kubernetes secrets use `data:`, which **requires base64-encoded strings** (e.g. `echo -n "my-token" | base64`).
+  * `stringData` allows writing the token in **plain human-readable text** in the local file. When you run `kubectl apply`, Kubernetes automatically base64-encodes the string before writing it to the cluster! This eliminates human copy-paste errors during token creation.
+
+---
+
+### 12. Interview Questions & Model Answers (Part 1.3)
+
+#### Q1: "What failure modes occur if model weights are downloaded to ephemeral container storage instead of a dedicated PersistentVolume?"
+> **Model Answer**:
+> *"If model weights are written to ephemeral container storage, they live in the container's temporary OverlayFS read-write layer. Any lifecycle event that terminates the container—such as an Out-of-Memory (OOM) kill, a rolling deployment update, a node preemption, or autoscaling down—destroys that layer permanently. When the replacement pod boots, it must re-download the 15GB model over the public internet, inflating cold-start times from 15 seconds to 12 minutes, causing HTTP 504 gateway timeouts for users, and risking API rate-limiting from Hugging Face."*
+
+#### Q2: "How does `HF_HOME` share cached model snapshots between different pods or restart cycles?"
+> **Model Answer**:
+> *"Hugging Face Hub uses a content-addressable cache layout governed by the `HF_HOME` environment variable. Under `$HF_HOME/hub/models--<org>--<repo>/`, files are deduplicated by SHA-256 hash in a `blobs/` directory, while `snapshots/<commit-hash>/` contains symlinks to those blobs. By mounting our 50GB PersistentVolume to `/root/.cache/huggingface` and pointing `HF_HOME` to that mount path, vLLM checks existing blob hashes at boot. If the snapshot is complete, it skips network downloads entirely and immediately memory-maps the weights from disk into GPU VRAM."*
+
+#### Q3: "What is the difference between ReadWriteOnce (RWO) and ReadWriteMany (RWX), and when would each be used in LLM serving?"
+> **Model Answer**:
+> *"ReadWriteOnce (RWO) means the volume can be mounted with read-write permissions by only a single Kubernetes node at a time, whereas ReadWriteMany (RWX) allows simultaneous read-write mounts across multiple nodes. For single-node serving or node-local storage (like k3s `local-path` on an NVMe SSD), RWO is preferred because local disks maximize sequential read throughput (several gigabytes per second) directly over the PCIe bus without network hop latency. In large multi-node clusters where 50 inference replicas must share a single model cache, RWX via a distributed network file system (like NFS, AWS EFS, or CephFS) is used so models are downloaded once for the entire fleet."*
+
+---
+
+*(Next up: Part 1.4 — Serving Manifests: vLLM FP16 Deployment, Service & Test Client [Laptop])*
+
 
 
 

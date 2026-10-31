@@ -187,7 +187,7 @@ llm-serving-k8s/
 ---
 
 #### Part 1.3: Model Cache Storage & Secrets Manifests
-- [ ] **Part 1.3**
+- [x] **Part 1.3**
   - **Goal**: Define a PersistentVolumeClaim and Hugging Face Secret template so model weights are cached on disk across pod restarts and deployments.
   - **Learn**:
     - Kubernetes Storage & k3s `local-path` provisioner: [k3s Storage](https://docs.k3s.io/storage)

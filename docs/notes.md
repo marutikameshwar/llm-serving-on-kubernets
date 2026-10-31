@@ -33,3 +33,13 @@ This document tracks technical decisions, architecture rationales, and milestone
   2. **Production GitOps Emulation**: Real engineering teams do not author manifests interactively on live production clusters; they author, review, lint, and push all configuration declaratively to version control first.
   3. **Deterministic Runbooks**: Developing all manifests upfront allows the GPU execution session to follow a strictly ordered, error-checked runbook. The VM is booted, executes the workloads, populates the empirical benchmark tables, and is immediately terminated.
 
+---
+
+## Part 1.3: Model Cache Storage & Secrets Manifests
+- **Date**: 2026-10-30
+- **Summary**: Defined the 50GB PersistentVolumeClaim (`k8s/base/model-cache-pvc.yaml`) and Hugging Face Secret template (`k8s/base/hf-secret.template.yaml`).
+- **Key Decisions**:
+  - Bound PVC to `storageClassName: local-path` with `accessModes: [ReadWriteOnce]`. This instructs k3s's Rancher local-path provisioner to carve storage directly out of the host VM's fast NVMe root disk (`/var/lib/rancher/k3s/storage/`), maximizing I/O throughput during `mmap` weight loads into GPU VRAM.
+  - Sized volume at 50Gi: Qwen2.5-7B FP16 requires ~15.2 GB, INT4 AWQ requires ~5.3 GB, and INT4 GPTQ requires ~5.2 GB. 50Gi provides ample headroom to cache all three precision variants simultaneously without triggering Kubelet disk pressure evictions.
+  - Used `type: Opaque` with `stringData` in `hf-secret.template.yaml` to allow human-readable token insertion on the VM without requiring manual base64 CLI encoding (`echo -n token | base64`). Committed only the `.template.yaml` file to enforce zero-secret exposure in git.
+

@@ -27,3 +27,4 @@ spec:
             nvidia.com/gpu: 1
             cpu: "500m"
             memory: 512Mi
+

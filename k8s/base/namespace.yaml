@@ -5,3 +5,4 @@ metadata:
   labels:
     environment: production
     app.kubernetes.io/part-of: llm-serving-k8s
+
