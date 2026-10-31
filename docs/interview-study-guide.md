@@ -360,6 +360,137 @@ The image `nvcr.io/nvidia/k8s/cuda-sample:vectoradd-cuda12.5.0-ubuntu22.04` exec
 
 ---
 
+### 8. Distributed AI Infrastructure: Multi-GPU Training & Serving Architecture
+
+In AI Infrastructure and Forward Deployed Engineering interviews, a premier evaluation question is:  
+> *"Llama-3-70B requires 140 GB in FP16, but our largest GPU (H100) has only 80 GB of VRAM. How do you partition and scale this model across multiple GPUs?"*
+
+Here is the comprehensive architectural breakdown.
+
+---
+
+#### A. The Hardware Bottleneck: The "Memory Wall"
+* A 70 Billion parameter model in **FP16** (16 bits = 2 bytes/param) requires:
+  $$\text{Model Weights} = 70 \times 10^9 \times 2\text{ bytes} \approx \mathbf{140\text{ GB}}$$
+* The largest single commercial GPU (NVIDIA H100) has **80 GB of HBM3 VRAM**.
+* **$140\text{ GB} > 80\text{ GB}$**: A single GPU physically cannot hold the model weights for inference.
+* **During Training, the VRAM Footprint Explodes**:
+  In addition to weights, training requires storing:
+  1. **Gradients**: $140\text{ GB}$ (2 bytes/param)
+  2. **Adam Optimizer States**: $560\text{ GB}$ (8 bytes/param for FP32 master weights, momentum, and variance)
+  3. **Activation Memory**: Hundreds of gigabytes depending on sequence length and batch size.
+  * *Total VRAM required to train a 70B model*: **$\mathbf{> 1,000\text{ GB}}$ (Over 1 Terabyte of VRAM)**!
+
+To overcome this, AI systems engineers deploy **Distributed Parallelism**.
+
+---
+
+#### B. The 4 Fundamental Parallelism Paradigms
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                   DISTRIBUTED PARALLELISM STRATEGIES                   │
+├──────────────────────────┬─────────────────────────────────────────────┤
+│ 1. Data Parallelism (DDP)│ Clone model on all GPUs, split data batch   │
+│ 2. Tensor Parallelism(TP)│ Slice individual weight matrices within layer│
+│ 3. Pipeline Parall. (PP) │ Split layers sequentially across GPUs       │
+│ 4. FSDP / DeepSpeed ZeRO │ Shard weights, gradients, optimizer states  │
+└──────────────────────────┴─────────────────────────────────────────────┘
+```
+
+##### 1. Data Parallelism (DDP) — *"Clone the Model, Split the Batch"*
+* **When to use**: When the model fits inside a single GPU, but you have huge datasets and want to train faster.
+* **Mechanism**:
+  * An identical copy of the full model is loaded onto each GPU.
+  * Each GPU receives a distinct micro-batch of training data.
+  * After calculating the forward and backward passes, the GPUs communicate via **NCCL (NVIDIA Collective Communications Library)** using an **All-Reduce** operation to average gradients across all GPUs before updating weights.
+
+##### 2. Tensor Parallelism (TP) — *"Slice Each Matrix Across GPUs (Intra-Layer)"*
+* **When to use**: When individual weight matrices are too large for one GPU, or for **ultra-low-latency serving** (the core technique in **vLLM** and **TensorRT-LLM**).
+* **Mechanism (Megatron-LM Style)**:
+  * In a Transformer, attention and MLP layers are matrix multiplications: $Y = X \times W$.
+  * If weight matrix $W$ has 16,000 columns, we slice it across 2 GPUs:
+    * **GPU 0**: Holds Columns $1 \dots 8,000$ ($W_1$). Computes $Y_1 = X \times W_1$.
+    * **GPU 1**: Holds Columns $8,001 \dots 16,000$ ($W_2$). Computes $Y_2 = X \times W_2$.
+  * An **All-Reduce** operation sums or concatenates the partial outputs to reconstruct $Y$.
+* **Hardware Requirement**: Extremely high inter-GPU bandwidth. Tensor Parallelism **must run over NVLink** (up to 900 GB/s on H100) within the same physical node. Running TP across Ethernet or InfiniBand between different nodes is too slow and stalls the GPU compute cores.
+* **Serving with vLLM**:
+  ```bash
+  vllm serve meta-llama/Llama-3-70B --tensor-parallel-size 4
+  ```
+
+##### 3. Pipeline Parallelism (PP) — *"The Factory Assembly Line (Inter-Layer)"*
+* **When to use**: When a model has dozens of layers (e.g. 80 Transformer blocks) that exceed a single node's total memory.
+* **Mechanism**:
+  * Layers are partitioned sequentially across GPUs:
+    * **GPU 0**: Layers $1 \dots 20$
+    * **GPU 1**: Layers $21 \dots 40$
+    * **GPU 2**: Layers $41 \dots 60$
+    * **GPU 3**: Layers $61 \dots 80$
+  * The prompt enters GPU 0 $\rightarrow$ activations are transmitted over network $\rightarrow$ GPU 1 $\rightarrow$ GPU 2 $\rightarrow$ GPU 3 produces the final logits.
+* **The "Bubble" Problem**: In a naive implementation, GPU 3 sits completely idle waiting for Layers 1–60 to finish. Modern systems use **1F1B (One Forward, One Backward)** micro-batch scheduling to interleave forward and backward passes and minimize idle time.
+
+##### 4. FSDP & DeepSpeed ZeRO — *"The Modern Standard: Shard Everything"*
+* **Origin**: Pioneered by Microsoft (**DeepSpeed ZeRO**: Zero Redundancy Optimizer) and standardized in PyTorch as **FSDP (Fully Sharded Data Parallel)**.
+* **Mechanism**:
+  * Standard DDP duplicates weights, gradients, and optimizer states across every GPU, wasting memory.
+  * **ZeRO Stage 1**: Shards the 8 bytes/param Adam optimizer states across all GPUs (cuts memory by $4\times$).
+  * **ZeRO Stage 2**: Shards optimizer states + gradients.
+  * **ZeRO Stage 3 / FSDP**: **Shards everything!** Weights, gradients, and optimizer states are split across all GPUs.
+  * *Just-In-Time Parameter Prefetching*: When GPU 0 needs to compute Layer 5, it executes an **All-Gather** to fetch the missing parameters from peer GPUs, computes the layer, and **instantly discards them from VRAM** before moving to Layer 6!
+
+---
+
+#### C. Comparison Matrix for Technical Interviews
+
+| Parallelism Scheme | What is Partitioned? | Primary Use Case | Interconnect Requirement | Primary Bottleneck |
+| :--- | :--- | :--- | :--- | :--- |
+| **Data Parallelism (DDP)** | Input Data Batches | High-throughput training of smaller models | Standard PCIe / 10GbE | Gradient All-Reduce time at large cluster scale |
+| **Tensor Parallelism (TP)** | Weight Matrices (within layers) | Low-latency inference (vLLM) & large model training | **NVLink (Intra-Node only: 900 GB/s)** | High communication frequency per layer |
+| **Pipeline Parallelism (PP)**| Transformer Layers (inter-layer) | Splitting multi-layer models across physical servers | InfiniBand / RoCE (Inter-Node) | Pipeline bubble (idle GPU wait states) |
+| **FSDP / ZeRO-3** | Weights + Gradients + Optimizer States | State-of-the-art LLM Training (Llama 3, DeepSeek) | High-Speed InfiniBand (400 Gbps) | All-Gather network latency during forward/backward |
+
+---
+
+#### D. How Kubernetes Manages Multi-GPU Clusters
+1. **Multi-GPU Pod Scheduling**:
+   * A single Pod can request all GPUs on an 8-GPU server:
+     ```yaml
+     resources:
+       limits:
+         nvidia.com/gpu: 8   # Schedules onto an 8x H100 node with NVLink mesh
+     ```
+2. **Kubernetes Multi-Node Training Operators**:
+   * **KubeRay / RayJob**: Deploys a Ray cluster across multiple GPU nodes for distributed inference and fine-tuning.
+   * **Kubeflow Training Operator (`PyTorchJob`)**: Automates distributed master/worker pods, configuring `RANK`, `WORLD_SIZE`, and `MASTER_ADDR` environment variables for PyTorch distributed backends.
+3. **High-Performance Networking in K8s**:
+   * Production GPU Kubernetes clusters deploy the **NVIDIA Network Operator** alongside the GPU Operator to enable **GPUDirect RDMA** (Remote Direct Memory Access), allowing GPUs on different servers to transfer memory directly over InfiniBand without bouncing through host CPU or RAM.
+
+---
+
+### 9. Master Learning Syllabus & Video Library
+
+To master both standard Kubernetes and GPU AI infrastructure, use this curated reference library:
+
+#### Track A: Standard Kubernetes Mastery
+* **[Kubernetes Tutorial for Beginners — TechWorld with Nana (YouTube)](https://www.youtube.com/watch?v=X48VuDVv0do)**: Visual, end-to-end breakdown of Pods, Deployments, Services, and Ingress.
+* **[Kubernetes Concepts & Architecture (Official Docs)](https://kubernetes.io/docs/concepts/architecture/)**: Master reference for control plane and worker node components.
+* **[iximiuz Labs (Ivan Velichko's Blog)](https://iximiuz.com/en/categories/?category=kubernetes)**: Hand-drawn architectural illustrations of containers, cgroups, and namespaces.
+* **[Killercoda Kubernetes Playground](https://killercoda.com/playgrounds/scenario/kubernetes)**: Free in-browser interactive Kubernetes terminal.
+* **[Kubernetes the Hard Way by Kelsey Hightower](https://github.com/kelseyhightower/kubernetes-the-hard-way)**: Step-by-step manual cluster construction for deep systems understanding.
+
+#### Track B: GPU in Containers & AI Serving Specialization
+* **[How to Use NVIDIA GPUs with Docker & Containers — Christian Lempa (YouTube)](https://www.youtube.com/watch?v=k_l3FzB070M)**: 15-minute hands-on guide to host drivers, NVIDIA Container Toolkit, and `/dev/nvidia*` mounts.
+* **[Demystifying GPU Support in Kubernetes — KubeCon + CloudNativeCon (YouTube)](https://www.youtube.com/watch?v=i9B3pX1G9Q4)**: Deep architectural conference talk explaining Kubelet device plugin gRPC calls and extended resources.
+* **[NVIDIA GPU Operator on Kubernetes — NVIDIA Developer (YouTube)](https://www.youtube.com/watch?v=0k5iZ_t077g)**: Walkthrough of Helm-based GPU Operator deployment.
+* **[vLLM & PagedAttention — Sky Computing Lab / Woosuk Kwon (YouTube)](https://www.youtube.com/watch?v=5ZlavKF_98U)**: The creator of vLLM explains PagedAttention, KV caching, and continuous batching.
+* **[Eugene Yan's Guide to LLM Serving](https://eugeneyan.com/writing/llm-serving/)**: Essential industry reading on TTFT, ITL, memory bottlenecks, and quantization.
+* **[Baseten Engineering Blog](https://www.baseten.co/blog/)**: Case studies on model cold-starts, TensorRT-LLM optimization, and cloud GPU economics.
+* **[NVIDIA Container Toolkit Architecture](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/arch-overview.html)**: Official specification on CDI (Container Device Interface) and runtime injection.
+
+---
+
 *(Next up: Part 1.3 — Model Cache Storage & Secrets Manifests [Laptop])*
+
 
 
