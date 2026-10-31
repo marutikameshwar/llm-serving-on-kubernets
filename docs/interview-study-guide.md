@@ -226,6 +226,6 @@ In GPU AI infrastructure, this is **physically impossible**.
 
 ---
 
-*(Next up: Part 1.3 — GPU Cluster Bootstrapping & Validation on Cloud VM)*
+*(Next up: Part 1.3 — Model Cache Storage & Secrets Manifests [Laptop])*
 
 

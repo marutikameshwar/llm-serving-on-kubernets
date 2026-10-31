@@ -137,13 +137,17 @@ llm-serving-k8s/
 # Milestone 1: v1 Core (Resume-Ready Baseline)
 
 > **Milestone Goal**: Establish a functional, observable, load-tested, and quantized LLM serving deployment on GPU Kubernetes that can immediately anchor an AI Infrastructure resume.
+>
+> **Execution Strategy (GitOps Batched Run)**: All manifests, scripts, benchmark configs, and dashboards are authored and validated on the laptop first (**Phase 1A**). Once the full codebase is committed and pushed, a single cloud GPU VM is rented to execute all live deployments, load tests, and benchmarks in one focused, cost-controlled run (**Phase 1B**), after which the VM is immediately terminated.
 
 ### Resume Checkpoint (v1 Core)
 > *"Engineered production LLM serving infrastructure on Kubernetes (k3s) for Qwen2.5-7B using vLLM and NVIDIA GPU Operator; optimized throughput to **[X]** tokens/sec across concurrency levels 1–16 and reduced VRAM by **[Y]%** via 4-bit quantization (comparing INT4 AWQ vs INT4 GPTQ) while monitoring TTFT, ITL, and KV cache saturation in Prometheus/Grafana."*
 
 ---
 
-### Part 1.1: Local Repository Scaffolding & Version Registry
+### [Phase 1A: Offline Manifest & Tooling Authoring (Laptop — $0 Cost)]
+
+#### Part 1.1: Local Repository Scaffolding & Version Registry
 - [x] **Part 1.1**
   - **Goal**: Establish the repository directory structure, documentation files, and pin all software versions so every component is reproducible and documented.
   - **Learn**:
@@ -153,6 +157,7 @@ llm-serving-k8s/
     - `docs/versions.md` (pinned versions for k3s, GPU Operator, Helm, vLLM, GuideLLM, Prometheus)
     - `docs/notes.md` (template for phase notes and rationale)
     - `.agent/rules/engineering-standards.md`
+    - `docs/interview-study-guide.md`
   - **Where**: Laptop
   - **Run**: Git commit and push from laptop. No GPU VM required.
   - **Verify**: Files exist locally, directory tree matches target structure, all versions are recorded with links to release notes.
@@ -162,7 +167,7 @@ llm-serving-k8s/
 
 ---
 
-### Part 1.2: Cluster Bootstrapping Script & GPU Operator Configuration
+#### Part 1.2: Cluster Bootstrapping Script & GPU Operator Configuration
 - [x] **Part 1.2**
   - **Goal**: Write an idempotent bash setup script to install k3s, Helm, and configure the NVIDIA GPU Operator without conflicting with host GPU drivers.
   - **Learn**:
@@ -181,25 +186,9 @@ llm-serving-k8s/
 
 ---
 
-### Part 1.3: GPU Cluster Bootstrapping & Validation
+#### Part 1.3: Model Cache Storage & Secrets Manifests
 - [ ] **Part 1.3**
-  - **Goal**: Rent an Ubuntu 22.04 GPU VM (L4/A10), execute the setup script, and confirm the Kubernetes scheduler can allocate `nvidia.com/gpu: 1`.
-  - **Learn**:
-    - Extended Resources in Kubernetes: [Kubernetes Schedule GPUs](https://kubernetes.io/docs/tasks/manage-gpus/scheduling-gpus/)
-    - Inspecting device plugin status: [NVIDIA K8s Device Plugin](https://github.com/NVIDIA/k8s-device-plugin)
-  - **Build**: None (executing files from Part 1.2).
-  - **Where**: GPU VM (Session 1 Start)
-  - **Run**: Clone repo on GPU VM, run `bash scripts/setup-gpu-vm.sh`, apply `k8s/base/cuda-vector-add.yaml`.
-  - **Verify**: `kubectl get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\.com/gpu}'` returns `1`; CUDA vector-add pod outputs `Test PASSED`.
-  - **Explain-back**:
-    1. How does the kubelet discover and expose GPU capacity to the Kubernetes API server?
-    2. What happens if a pod requests `nvidia.com/gpu: 1` but no node has free allocatable GPU resources?
-
----
-
-### Part 1.4: Model Cache PVC & Hugging Face Secret Manifests
-- [ ] **Part 1.4**
-  - **Goal**: Define a PersistentVolumeClaim and Hugging Face Secret so model weights are cached on disk across pod restarts and deployments.
+  - **Goal**: Define a PersistentVolumeClaim and Hugging Face Secret template so model weights are cached on disk across pod restarts and deployments.
   - **Learn**:
     - Kubernetes Storage & k3s `local-path` provisioner: [k3s Storage](https://docs.k3s.io/storage)
     - Hugging Face cache management & `HF_HOME`: [HF Hub Cache System](https://huggingface.co/docs/huggingface_hub/guides/manage-cache)
@@ -215,9 +204,9 @@ llm-serving-k8s/
 
 ---
 
-### Part 1.5: vLLM FP16 Deployment & Service Manifests
-- [ ] **Part 1.5**
-  - **Goal**: Create production-grade Kubernetes Deployment and Service manifests for Qwen2.5-7B-Instruct using vLLM with health probes, resource limits, and shared memory.
+#### Part 1.4: Serving Manifests — vLLM FP16 Deployment, Service & Test Client
+- [ ] **Part 1.4**
+  - **Goal**: Create production-grade Kubernetes Deployment and Service manifests for Qwen2.5-7B-Instruct using vLLM with health probes, resource limits, and shared memory, plus a streaming Python test client.
   - **Learn**:
     - vLLM Engine Arguments & Server Configuration: [vLLM Serving Arguments](https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html)
     - PyTorch Shared Memory (`/dev/shm`) in Docker/K8s: [PyTorch IPC Multiprocessing](https://pytorch.org/docs/stable/multiprocessing.html)
@@ -235,45 +224,29 @@ llm-serving-k8s/
 
 ---
 
-### Part 1.6: Deploying & Validating vLLM FP16 Inference
-- [ ] **Part 1.6**
-  - **Goal**: Deploy vLLM FP16 on the GPU cluster, observe weight download and engine initialization, and verify token streaming via the OpenAI-compatible endpoint.
-  - **Learn**:
-    - PagedAttention block allocation logs: [vLLM PagedAttention Paper](https://arxiv.org/abs/2309.06180)
-    - OpenAI Chat Completions API standard: [OpenAI API Reference](https://platform.openai.com/docs/api-reference/chat)
-  - **Build**: Update `docs/notes.md` with observed startup timings and memory allocations.
-  - **Where**: GPU VM (Session 1 Continued)
-  - **Run**: Apply PVC and secret, apply vLLM deployment & service, monitor logs with `kubectl logs -f`, run `python3 scripts/test-client.py`.
-  - **Verify**: vLLM pod reaches `Running` and `Ready 1/1`; `test-client.py` streams generated tokens from Qwen2.5-7B.
-  - **Explain-back**:
-    1. How does PagedAttention eliminate KV cache fragmentation compared to standard Hugging Face Transformers?
-    2. What does the vLLM log line "Available KV cache memory" indicate about GPU memory allocation?
-
----
-
-### Part 1.7: Observability Stack — Prometheus, Grafana & DCGM Exporter
-- [ ] **Part 1.7**
-  - **Goal**: Deploy `kube-prometheus-stack`, configure DCGM Exporter via GPU Operator, and build a unified Grafana dashboard displaying LLM serving and GPU hardware metrics.
+#### Part 1.5: Observability Manifests — Prometheus Stack & Grafana Dashboard
+- [ ] **Part 1.5**
+  - **Goal**: Prepare Prometheus Helm values, vLLM ServiceMonitor, and a customized Grafana dashboard JSON to capture both LLM engine metrics and DCGM GPU hardware telemetry.
   - **Learn**:
     - vLLM Prometheus metrics specification: [vLLM Metrics Documentation](https://docs.vllm.ai/en/latest/serving/metrics.html)
-    - NVIDIA DCGM Exporter metrics (GPU util, frame buffer memory, tensor core activity): [NVIDIA DCGM Exporter](https://docs.nvidia.com/datacenter/cloud-native/gpu-telemetry/latest/dcgm-exporter.html)
-    - Prometheus Operator CRDs (`ServiceMonitor`, `PodMonitor`): [Prometheus Operator Getting Started](https://prometheus-operator.dev/docs/user-guides/getting-started/)
+    - NVIDIA DCGM Exporter metrics: [NVIDIA DCGM Exporter](https://docs.nvidia.com/datacenter/cloud-native/gpu-telemetry/latest/dcgm-exporter.html)
+    - Prometheus Operator CRDs (`ServiceMonitor`): [Prometheus Operator Getting Started](https://prometheus-operator.dev/docs/user-guides/getting-started/)
   - **Build**:
-    - `monitoring/prometheus/values.yaml` (kube-prometheus-stack values)
+    - `monitoring/prometheus/values.yaml` (kube-prometheus-stack Helm values)
     - `monitoring/prometheus/vllm-servicemonitor.yaml`
     - `monitoring/grafana/dashboards/vllm-dcgm-overview.json`
-  - **Where**: Laptop (draft) -> GPU VM (deploy)
-  - **Run**: Deploy Helm chart on VM, apply ServiceMonitor, port-forward Grafana (`3000:80`).
-  - **Verify**: Prometheus targets list shows both `vllm` and `dcgm-exporter` as `UP (1/1)`; Grafana graphs show live GPU VRAM usage and vLLM request counts.
+  - **Where**: Laptop
+  - **Run**: Validate YAML and JSON syntax, commit and push.
+  - **Verify**: ServiceMonitor matches vLLM service labels and port; Grafana dashboard contains panels for TTFT, ITL, KV Cache Saturation, and DCGM VRAM usage.
   - **Explain-back**:
-    1. What is the difference between Time to First Token (TTFT) and Inter-Token Latency (ITL), and which metrics represent them in vLLM?
-    2. Why is GPU compute utilization often misleading for LLM workloads compared to memory bandwidth and KV cache usage?
+    1. What is the difference between Time to First Token (TTFT) and Inter-Token Latency (ITL), and which Prometheus metrics represent them in vLLM?
+    2. Why is raw GPU compute utilization often misleading for LLM workloads compared to memory bandwidth and KV cache usage?
 
 ---
 
-### Part 1.8: Load Testing with GuideLLM as a Kubernetes Job
-- [ ] **Part 1.8**
-  - **Goal**: Deploy GuideLLM inside the cluster as a Kubernetes Job to benchmark vLLM FP16 under concurrency levels 1, 4, 8, and 16, capturing TTFT, ITL, and throughput.
+#### Part 1.6: Load Testing Manifests — GuideLLM Job, Configs & Results Parser
+- [ ] **Part 1.6**
+  - **Goal**: Author the GuideLLM Kubernetes Job manifest, benchmark configuration files, and a Python results parser to evaluate throughput and latency across concurrencies 1, 4, 8, and 16.
   - **Learn**:
     - GuideLLM architecture and benchmark methodology: [Neural Magic GuideLLM Docs](https://github.com/vllm-project/guidellm)
     - Poisson arrival processes vs constant concurrency in generative AI benchmarking: [GuideLLM Benchmark Guide](https://github.com/vllm-project/guidellm)
@@ -281,18 +254,18 @@ llm-serving-k8s/
     - `benchmarks/guidellm/config-fp16.yaml`
     - `k8s/jobs/guidellm-benchmark.yaml`
     - `benchmarks/guidellm/parse_results.py`
-  - **Where**: Laptop (draft) -> GPU VM (run)
-  - **Run**: Submit GuideLLM K8s Job, monitor execution, parse JSON results into markdown table.
-  - **Verify**: Completed GuideLLM Job logs containing full summary table; results table in `TASKS.md` populated for FP16.
+  - **Where**: Laptop
+  - **Run**: Verify syntax, commit and push.
+  - **Verify**: GuideLLM Job mounts results volume, uses correct `guidellm run --target` CLI syntax, and parser outputs markdown table format.
   - **Explain-back**:
     1. How does increasing concurrency affect TTFT versus ITL under continuous batching?
     2. What causes the "knee in the curve" where throughput saturates and latency spikes exponentially?
 
 ---
 
-### Part 1.9: Quantization Benchmark: 4-bit Quantization (INT4 AWQ vs. INT4 GPTQ)
-- [ ] **Part 1.9**
-  - **Goal**: Deploy both `Qwen/Qwen2.5-7B-Instruct-AWQ` and `Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4`, run identical GuideLLM load tests, and contrast VRAM usage, TTFT, and token throughput against the FP16 baseline.
+#### Part 1.7: 4-Bit Quantization Manifests — INT4 AWQ & INT4 GPTQ
+- [ ] **Part 1.7**
+  - **Goal**: Author Kubernetes Deployment manifests and GuideLLM benchmark configurations for both `Qwen/Qwen2.5-7B-Instruct-AWQ` and `Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4`.
   - **Learn**:
     - Activation-aware Weight Quantization (AWQ) concepts: [AWQ Paper](https://arxiv.org/abs/2306.00978)
     - Accurate Post-Training Quantization for Generative Pre-trained Transformers (GPTQ): [GPTQ Paper](https://arxiv.org/abs/2210.17323)
@@ -302,25 +275,72 @@ llm-serving-k8s/
     - `k8s/vllm/deployment-gptq.yaml`
     - `benchmarks/guidellm/config-awq.yaml`
     - `benchmarks/guidellm/config-gptq.yaml`
-  - **Where**: Laptop (draft) -> GPU VM (run)
-  - **Run**: Deploy AWQ and GPTQ variants sequentially, rerun GuideLLM job, collect metrics.
-  - **Verify**: Quantization table filled for both INT4 AWQ and INT4 GPTQ; verify VRAM reduction from ~15GB to ~5GB and compare throughput.
+  - **Where**: Laptop
+  - **Run**: Git commit and push.
+  - **Verify**: Deployments target proper Hugging Face model IDs, configure quantization flags (`--quantization awq` / `--quantization gptq`), and share the same model cache PVC.
   - **Explain-back**:
-    1. How do AWQ (protecting salient weights by activation magnitude) and GPTQ (second-order error compensation via inverse Hessian) differ fundamentally in their quantization math?
-    2. What are the Marlin optimized kernels in vLLM, and how do they accelerate 4-bit matrix multiplication?
-    3. Why does weight-only INT4 quantization reduce memory footprint by ~3x but may not always speed up low-batch inference?
+    1. How do AWQ and GPTQ differ in their mathematical approach to selecting which weights to quantize?
+    2. What are Marlin optimized kernels in vLLM, and how do they accelerate 4-bit matrix multiplication?
 
 ---
 
-### Part 1.10: v1 Portfolio Artifacts & README
+### [Phase 1B: Batched GPU Execution & Live Benchmarking (GPU VM Session)]
+
+#### Part 1.8: GPU VM Genesis & CUDA Smoke Test
+- [ ] **Part 1.8**
+  - **Goal**: Rent an Ubuntu 22.04 GPU VM (L4/A10), execute `scripts/setup-gpu-vm.sh`, and verify the Kubernetes scheduler can allocate `nvidia.com/gpu: 1` via the CUDA vector-add test.
+  - **Where**: GPU VM (Session 1 Start)
+  - **Run**: Clone repo, run `bash scripts/setup-gpu-vm.sh`, apply `k8s/base/namespace.yaml` and `k8s/base/cuda-vector-add.yaml`.
+  - **Verify**: `kubectl get nodes` reports 1 GPU allocatable; CUDA vector-add pod logs `Test PASSED`.
+  - **Explain-back**:
+    1. How does the kubelet discover and expose GPU capacity to the Kubernetes API server?
+
+---
+
+#### Part 1.9: Live vLLM FP16 Deployment & Streaming Test
+- [ ] **Part 1.9**
+  - **Goal**: Apply the model cache PVC, Hugging Face Secret, and vLLM FP16 deployment; verify weight caching and stream first inference tokens via `test-client.py`.
+  - **Where**: GPU VM
+  - **Run**: Apply base manifests and vLLM FP16 deployment; run `python3 scripts/test-client.py`.
+  - **Verify**: Pod reaches `1/1 Running`; test client streams completed response from Qwen2.5-7B.
+  - **Explain-back**:
+    1. How does PagedAttention eliminate KV cache fragmentation compared to standard Hugging Face Transformers?
+    2. What does the vLLM log line "Available KV cache memory" indicate about GPU memory allocation?
+
+---
+
+#### Part 1.10: Live Observability Stack Deployment & Metric Telemetry
 - [ ] **Part 1.10**
-  - **Goal**: Assemble the v1 README with a professional architecture diagram, benchmark charts, trade-off analysis, and update phase notes.
-  - **Learn**:
-    - Structuring technical portfolios for AI systems engineering: [GitHub Engineering Portfolio Standards](https://docs.github.com/)
-    - Mermaid diagram syntax for cloud-native architectures: [Mermaid Sequence & Flowchart Docs](https://mermaid.js.org/)
-  - **Build**:
-    - `README.md` (architecture diagram, results tables, quickstart guide)
-    - `docs/notes.md` (v1 retrospective and architectural decisions)
+  - **Goal**: Deploy `kube-prometheus-stack` via Helm, apply the vLLM ServiceMonitor, port-forward Grafana, and confirm live metrics from vLLM and DCGM.
+  - **Where**: GPU VM
+  - **Run**: Install Prometheus Helm chart with `values.yaml`, apply ServiceMonitor, port-forward Grafana (`3000:80`).
+  - **Verify**: Prometheus targets `vllm` and `dcgm-exporter` show `UP (1/1)`; Grafana graphs show live GPU VRAM usage and vLLM request counts.
+
+---
+
+#### Part 1.11: Live GuideLLM Load Testing on FP16 Baseline
+- [ ] **Part 1.11**
+  - **Goal**: Run GuideLLM Kubernetes Job against vLLM FP16 across concurrencies 1, 4, 8, and 16; parse output and record baseline metrics.
+  - **Where**: GPU VM
+  - **Run**: Apply `k8s/jobs/guidellm-benchmark.yaml`, parse JSON logs with `parse_results.py`.
+  - **Verify**: Table 1 in `TASKS.md` populated with real FP16 TTFT, ITL, and tok/s data.
+
+---
+
+#### Part 1.12: Live 4-Bit Quantization Benchmarking (AWQ & GPTQ)
+- [ ] **Part 1.12**
+  - **Goal**: Deploy `Qwen2.5-7B-Instruct-AWQ` and `Qwen2.5-7B-Instruct-GPTQ-Int4`, run identical GuideLLM load tests, record VRAM reduction and throughput deltas, then terminate the GPU VM.
+  - **Where**: GPU VM (Session 1 Finish)
+  - **Run**: Switch deployments, execute GuideLLM jobs for AWQ and GPTQ, record all numbers in Table 1 & Table 2, commit results, and stop/delete cloud VM.
+  - **Verify**: All FP16, AWQ, and GPTQ rows in Result Tables populated; GPU VM stopped to eliminate all further rental billing.
+
+---
+
+### [Phase 1C: Synthesis & Portfolio]
+
+#### Part 1.13: v1 Portfolio Artifacts, README & Architecture Diagrams
+- [ ] **Part 1.13**
+  - **Goal**: Author the v1 README with a professional Mermaid architecture diagram, populated benchmark charts, trade-off analysis, and update phase notes.
   - **Where**: Laptop
   - **Run**: Git commit and push to GitHub.
   - **Verify**: GitHub renders README cleanly with working diagrams, tables, and links; resume bullet is ready for applications.
