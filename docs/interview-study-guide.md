@@ -490,7 +490,92 @@ To master both standard Kubernetes and GPU AI infrastructure, use this curated r
 
 ---
 
+### 10. Kubernetes Storage Architecture & Pod Lifecycle (Why PVCs are Mandatory in AI Serving)
+
+In modern cloud-native systems, Pods are treated as **ephemeral ("cattle, not pets")**—they are designed to be stopped, evicted, upgraded, and destroyed automatically. 
+
+Understanding how storage and secrets work during pod lifecycle events is essential for AI Infrastructure interviews.
+
+---
+
+#### A. The "Hotel Room" Ephemeral Storage Problem
+* Standard container images (`vllm/vllm-openai`) are composed of immutable, **read-only layers**.
+* At container startup, the container runtime (containerd) attaches a temporary, read-write layer on top via **OverlayFS**.
+* When vLLM downloads the 15.2 GB of Qwen2.5-7B weights from Hugging Face, they are written to this temporary layer.
+* **The Fatal Flaw**: When a pod terminates or crashes, containerd destroys that temporary read-write layer. **All 15.2 GB of downloaded model weights are wiped out instantly.**
+
+---
+
+#### B. The 5 Real-World Scenarios Where Pods are Destroyed & Recreated
+
+1. **Traffic Spikes & Out-of-Memory Crashes (`OOMKilled`)**:
+   * Multiple concurrent users submit large context prompts (e.g. 8,000 tokens). The attention KV cache exhausts VRAM or host memory. The Linux kernel sends `SIGKILL` (**Exit Code 137**).
+   * Kubernetes immediately cleans up the dead pod and creates a replacement pod.
+2. **Configuration Updates & Rolling Deployments**:
+   * An engineer changes a flag in `deployment.yaml` (e.g. `--max-model-len 8192` or testing a new quantization scheme).
+   * Kubernetes executes a **Rolling Update**, provisioning a new pod and terminating the old one.
+3. **Dynamic Autoscaling (Scaling Up & Down)**:
+   * During low nighttime traffic, KEDA scales replicas down from 3 pods to 1 pod (destroying Pods 2 and 3).
+   * In the morning rush, KEDA scales back up from 1 pod to 3 pods (creating Pods 2 and 3).
+4. **Cloud Preemptible / Spot GPU Instance Reclamation**:
+   * To save 60%–80% on compute bills, AI clusters run on Spot GPU instances (AWS Spot, RunPod Spot). When cloud providers reclaim a node, pods are evicted and rescheduled onto another available node.
+5. **Kubelet DiskPressure Evictions**:
+   * If a container downloads 15 GB directly into ephemeral storage, it writes directly to the host OS root filesystem (`/var/lib/containerd`). If disk usage crosses 85%, Kubelet enters `DiskPressure` state and forcibly **evicts (kills)** the largest pods to protect the host OS from crashing.
+
+---
+
+#### C. The Solution: The Kubernetes Storage Trinity
+
+To decouple model weight storage from the fragile container lifecycle, Kubernetes uses three decoupled abstractions:
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│ 1. StorageClass (The Storage Policy / Provisioner)                     │
+│    • In k3s: `local-path`. Tells K8s to carve space out of the host's  │
+│      local high-speed NVMe SSD.                                        │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ Dynamically Provisions
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ 2. PersistentVolume - PV (The Physical Disk Directory)                 │
+│    • A permanent host directory: `/var/lib/rancher/k3s/storage/pvc-...`│
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ Bound to
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ 3. PersistentVolumeClaim - PVC (The Storage Claim / Request)           │
+│    • Declares: "Request 50Gi of ReadWriteOnce storage."                │
+│    • Mounted inside the vLLM pod at `/root/.cache/huggingface`         │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+##### Impact Comparison: With vs. Without PVC
+
+| Operational Event | Without PVC (Amateur Setup) | With PVC (Production AI Infra) |
+| :--- | :--- | :--- |
+| **Pod OOM Crash Recovery** | 12 minutes downtime (re-download 15 GB) | **15 seconds recovery (local disk cache hit)** |
+| **YAML Config Update** | 12 minutes delay per rollout | **Instant rolling update with zero user downtime** |
+| **Morning Scale-Up** | New pods lag by 15 minutes before ready | **New pods ready to serve traffic in 20 seconds** |
+| **Hugging Face API Limits**| Risk of HTTP 429 Too Many Requests | **Zero downloads needed after initial cache** |
+| **Cloud Bandwidth Costs** | Gigabytes of repeated egress bandwidth | **$0 wasted network bandwidth** |
+
+---
+
+#### D. The Secrets Paradigm: Why `kind: Secret` Matters
+
+* **The Security Threat**: Hugging Face API tokens (`hf_...`) allow access to model weights and gated repos. Automated bot networks continuously scan public GitHub commits in real time (within 2 seconds of pushing). Hardcoding a secret in a git-tracked YAML leads to immediate account compromise and API quota exhaustion.
+* **The Kubernetes Fix**:
+  * Passwords and tokens are stored in an encrypted/isolated Kubernetes object: `kind: Secret`.
+  * The Deployment YAML references the secret via `valueFrom.secretKeyRef` without ever exposing the raw string.
+  * At container boot, Kubernetes mounts the secret as an in-memory environment variable (`HF_TOKEN`) inside the isolated container Linux namespace.
+* **The GitOps Template Pattern**:
+  * We commit `hf-secret.template.yaml` with placeholder strings (`PASTE_YOUR_HF_TOKEN_HERE`).
+  * On the actual VM, engineers copy this to `hf-secret.yaml` (which is excluded by `.gitignore`) and apply it. Version control remains 100% clean and audit-compliant.
+
+---
+
 *(Next up: Part 1.3 — Model Cache Storage & Secrets Manifests [Laptop])*
+
 
 
 
