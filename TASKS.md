@@ -205,7 +205,7 @@ llm-serving-k8s/
 ---
 
 #### Part 1.4: Serving Manifests — vLLM FP16 Deployment, Service & Test Client
-- [ ] **Part 1.4**
+- [x] **Part 1.4**
   - **Goal**: Create production-grade Kubernetes Deployment and Service manifests for Qwen2.5-7B-Instruct using vLLM with health probes, resource limits, and shared memory, plus a streaming Python test client.
   - **Learn**:
     - vLLM Engine Arguments & Server Configuration: [vLLM Serving Arguments](https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html)

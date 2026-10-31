@@ -43,3 +43,14 @@ This document tracks technical decisions, architecture rationales, and milestone
   - Sized volume at 50Gi: Qwen2.5-7B FP16 requires ~15.2 GB, INT4 AWQ requires ~5.3 GB, and INT4 GPTQ requires ~5.2 GB. 50Gi provides ample headroom to cache all three precision variants simultaneously without triggering Kubelet disk pressure evictions.
   - Used `type: Opaque` with `stringData` in `hf-secret.template.yaml` to allow human-readable token insertion on the VM without requiring manual base64 CLI encoding (`echo -n token | base64`). Committed only the `.template.yaml` file to enforce zero-secret exposure in git.
 
+---
+
+## Part 1.4: Serving Manifests — vLLM FP16 Deployment, Service & Test Client
+- **Date**: 2026-10-30
+- **Summary**: Authored production-ready Deployment (`k8s/vllm/deployment-fp16.yaml`), ClusterIP Service (`k8s/vllm/service.yaml`), and a zero-dependency Python streaming client (`scripts/test-client.py`).
+- **Key Decisions**:
+  - Mounted an `emptyDir` memory volume with `sizeLimit: 4Gi` to `/dev/shm`. Default container shared memory is capped at 64MB, causing immediate PyTorch DataLoader and NCCL inter-process communication crashes under multi-threaded serving.
+  - Architected three distinct probes: a 10-minute `startupProbe` (`failureThreshold: 60`, `periodSeconds: 10`) protecting the container while downloading 15GB weights, a 5-second `readinessProbe` ensuring traffic is only routed when the engine is actively listening, and a 15-second `livenessProbe` to detect deadlocks without prematurely restarting a busy model.
+  - Constrained `--max-model-len 4096` and `--gpu-memory-utilization 0.90` to guarantee that KV cache allocation fits reliably within a single 24GB VRAM budget alongside FP16 weights.
+  - Implemented `scripts/test-client.py` using standard library `urllib` to eliminate third-party Python dependency friction on client environments.
+

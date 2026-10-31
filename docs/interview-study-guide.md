@@ -659,7 +659,126 @@ stringData:
 
 ---
 
-*(Next up: Part 1.4 — Serving Manifests: vLLM FP16 Deployment, Service & Test Client [Laptop])*
+### 13. Serving Manifests Deep Dive: `deployment-fp16.yaml`, `service.yaml`, & `test-client.py` (Part 1.4)
+
+In Part 1.4, we engineered the production core: the long-running vLLM serving engine, its network ingress service, and a streaming verification client.
+
+---
+
+#### Manifest A: `k8s/vllm/deployment-fp16.yaml`
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-fp16
+  namespace: llm-serving
+...
+```
+
+##### 1. The Controller: Deployment vs. Job
+* **`kind: Deployment`**: Unlike our earlier `cuda-vector-add` **Job** (which terminates with exit code 0 when done), a **Deployment** is designed to run **indefinitely**.
+* If the underlying process crashes, the node restarts, or an OOM event occurs, the Deployment controller automatically reconciles and brings up a new Pod to maintain `replicas: 1`.
+
+##### 2. The vLLM Serving Flags (`args`)
+* `--model Qwen/Qwen2.5-7B-Instruct`: Specifies the Hugging Face repository ID.
+* `--served-model-name qwen2.5-7b`: Provides a clean alias for the OpenAI `/v1/chat/completions` API so client requests don't need to specify the full Hugging Face repository URL.
+* `--port 8000`: Standard port exposing the OpenAI-compatible HTTP server.
+* `--gpu-memory-utilization 0.90`:
+  * Tells vLLM: *"Allocate up to 90% of physical GPU VRAM."*
+  * On a 24GB L4/A10 GPU: $24\text{ GB} \times 0.90 = \mathbf{21.6\text{ GB}}$ is allocated to model weights and PagedAttention KV cache blocks.
+  * The remaining **10% (2.4 GB)** is reserved for PyTorch activation buffers, CUDA context, and memory fragmentation.
+  * *(Interview Warning)*: If you set this to `1.0`, PyTorch will instantly crash with a CUDA Out-of-Memory error the moment the first user prompt creates activation tensors!
+* `--max-model-len 4096`:
+  * Caps maximum sequence length (input prompt + generated tokens) to 4,096.
+  * Restricting this prevents long-context requests from consuming excessive KV cache memory on a single 24GB GPU.
+
+##### 3. The `/dev/shm` Shared Memory Volume (The PyTorch Bus Error Trap)
+```yaml
+volumes:
+- name: dshm
+  emptyDir:
+    medium: Memory
+    sizeLimit: 4Gi
+volumeMounts:
+- name: dshm
+  mountPath: /dev/shm
+```
+* **Why it matters**: In Linux, `/dev/shm` is a POSIX shared-memory RAM disk. PyTorch worker threads use `/dev/shm` to pass tensor tensors between Python processes without copying them over slow IPC sockets.
+* Default Docker/Kubernetes `/dev/shm` is capped at **64 MB**. Under multi-threaded inference, PyTorch instantly exhausts 64MB and crashes with:
+  ```text
+  RuntimeError: DataLoader worker (pid ...) is killed by signal: Bus error
+  ```
+* By mounting an `emptyDir` with `medium: Memory` and `sizeLimit: 4Gi`, we give PyTorch a 4GB in-memory shared workspace.
+
+##### 4. The 3-Stage Health Probe Hierarchy
+In AI serving, naive health probes will kill your pod during model initialization. We use a three-tier architecture:
+
+```
+[ Pod Container Launches ]
+           │
+           ▼
+[ Phase 1: startupProbe (Window: Up to 10 Minutes) ]
+  • initialDelaySeconds: 30
+  • periodSeconds: 10
+  • failureThreshold: 60  (60 * 10s = 600s max)
+  • Purpose: Shields vLLM from being killed while downloading 15GB weights
+             and allocating the KV cache. All other probes are DISABLED.
+           │ (Startup Probe Returns HTTP 200 OK)
+           ▼
+[ Phase 2: readinessProbe (Live Traffic Gate) ]
+  • periodSeconds: 5 | failureThreshold: 3
+  • Purpose: If vLLM is temporarily busy or reloading weights, readiness fails.
+             Kubernetes instantly pulls the pod out of the Service endpoint so
+             users don't receive HTTP 500/503 errors.
+           │
+[ Phase 3: livenessProbe (Deadlock Detection) ]
+  • periodSeconds: 15 | failureThreshold: 3
+  • Purpose: Detects permanent engine deadlocks. Only restarts the container
+             if the server has frozen completely for > 45 seconds.
+```
+
+---
+
+#### Manifest B: `k8s/vllm/service.yaml`
+* **`kind: Service` (ClusterIP)**:
+  * Creates an internal, stable virtual IP and DNS name (`vllm-service.llm-serving.svc.cluster.local:8000`).
+  * `selector: app: vllm-serving`: Routes traffic to any pod bearing this label. When we swap deployments between FP16, INT4 AWQ, and INT4 GPTQ, the service automatically routes to whichever precision variant is currently running!
+
+---
+
+#### Client Script: `scripts/test-client.py`
+* **Architecture**: A streaming client implemented with Python's standard `urllib` library (zero external dependencies required).
+* **Protocol**: Uses **Server-Sent Events (SSE)** over HTTP:
+  ```text
+  data: {"id":"chat-123","choices":[{"delta":{"content":"Paged"}}]}
+  data: {"id":"chat-123","choices":[{"delta":{"content":"Attention"}}]}
+  data: [DONE]
+  ```
+* **Telemetry Calculated**:
+  * **Time to First Token (TTFT)**: Elapsed milliseconds from sending the request to the arrival of the very first token chunk.
+  * **Throughput**: Calculated as $\frac{\text{Generated Tokens}}{\text{Generation Time}}$ (tokens/second).
+
+---
+
+### 14. Interview Questions & Model Answers (Part 1.4)
+
+#### Q1: "Why does PyTorch/vLLM require a large `/dev/shm` mount in Kubernetes, and what error occurs if left default?"
+> **Model Answer**:
+> *"PyTorch multiprocessing relies on POSIX shared memory (`/dev/shm`) for inter-process tensor communication, data loading, and CUDA context management without serialization overhead. Docker and Kubernetes default `/dev/shm` to a tiny 64MB limit. When serving high-throughput requests, PyTorch attempts to allocate shared memory blocks larger than 64MB, resulting in an unrecoverable `RuntimeError: Bus error` or container crash. To solve this in production, we mount an `emptyDir` volume with `medium: Memory` and a 4GiB size limit directly to `/dev/shm`, providing RAM-backed shared memory."*
+
+#### Q2: "How should health probes be configured for LLM inference engines like vLLM?"
+> **Model Answer**:
+> *"LLM engines experience long cold-start times (3 to 10 minutes) while downloading multi-gigabyte weights, warming up CUDA kernels, and profiling KV cache allocations. If standard liveness probes are applied with typical 10-30 second timeouts, Kubernetes will prematurely kill the initializing container in an endless CrashLoopBackOff. The production pattern is to use a `startupProbe` with a generous failure threshold (e.g. 60 attempts every 10s = 10 minutes) to protect the initialization window. Once `startupProbe` passes, a frequent `readinessProbe` gates user traffic, and a conservative `livenessProbe` monitors for genuine application deadlocks."*
+
+#### Q3: "What does `--gpu-memory-utilization 0.90` do in vLLM, and why shouldn't it be set to 1.0?"
+> **Model Answer**:
+> *"The `--gpu-memory-utilization` flag determines the fraction of total physical GPU VRAM that vLLM is permitted to pre-allocate for model weights and PagedAttention KV cache blocks. Setting it to 0.90 means vLLM claims 90% of VRAM (e.g., 21.6 GB on a 24GB L4/A10 GPU). Setting this parameter to 1.0 causes immediate runtime crashes because PyTorch requires temporary workspace memory for activation tensors, CUDA driver context, and dynamic library overhead during matrix multiplication. Leaving a 10% safety buffer guarantees stability under sudden context length surges."*
+
+---
+
+*(Next up: Part 1.5 — Observability Manifests: Prometheus Stack & Grafana Dashboard [Laptop])*
+
 
 
 
