@@ -226,6 +226,122 @@ In GPU AI infrastructure, this is **physically impossible**.
 
 ---
 
+### 5. Line-by-Line Kubernetes Manifest Deep Dive
+
+In Kubernetes, you write **Declarative Configuration**: you specify the *Desired State* (what you want to exist), and the Kubernetes control loop works continuously to make reality match your declaration.
+
+Every Kubernetes manifest is structured around **4 Core Pillars**:
+1. `apiVersion`: Which version of the Kubernetes API handles this resource type.
+2. `kind`: What type of resource you are declaring (Namespace, Job, Pod, Deployment, Service).
+3. `metadata`: Unique identity, name, namespace, and search labels.
+4. `spec`: The actual technical blueprint/specification of the workload.
+
+---
+
+#### Manifest A: `k8s/base/namespace.yaml`
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llm-serving
+  labels:
+    environment: production
+    app.kubernetes.io/part-of: llm-serving-k8s
+```
+* `apiVersion: v1`: Uses the foundational core Kubernetes API group (where Namespaces, Pods, Services, and Secrets live).
+* `kind: Namespace`: Creates an isolated logical boundary (like a dedicated folder on a filesystem). Isolates our LLM serving pods from system pods so we can manage access, quotas, and cleanup cleanly.
+* `metadata.name: llm-serving`: The unique name of this namespace in our cluster.
+* `metadata.labels`: Key-value tags. `environment: production` tags the tier; `app.kubernetes.io/part-of: llm-serving-k8s` is the official CNCF standard label enabling observability tools (Prometheus, Grafana) to group telemetry by project.
+
+---
+
+#### Manifest B: `k8s/base/cuda-vector-add.yaml`
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cuda-vector-add
+  namespace: llm-serving
+  labels:
+    app.kubernetes.io/name: cuda-vector-add
+    app.kubernetes.io/part-of: llm-serving-k8s
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cuda-vector-add
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: cuda-vector-add
+        image: nvcr.io/nvidia/k8s/cuda-sample:vectoradd-cuda12.5.0-ubuntu22.04
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            cpu: "1"
+            memory: 1Gi
+          requests:
+            nvidia.com/gpu: 1
+            cpu: "500m"
+            memory: 512Mi
+```
+
+##### 1. Job Controller Mechanics (`spec`)
+* `apiVersion: batch/v1`: Jobs belong to the `batch` API group because they run batch workloads.
+* `kind: Job`: 
+  * **Job vs. Deployment**: A Deployment runs continuously forever (if a web server or vLLM container exits, it restarts it). A Job runs **to completion** (it executes a task once, and when the task succeeds with exit code 0, it terminates cleanly).
+* `spec.ttlSecondsAfterFinished: 600`: **Automated Garbage Collection**. `ttl` = Time To Live. After this job finishes, Kubernetes retains the pod for 600 seconds (10 minutes) so an engineer can view logs, then automatically deletes it to prevent cluster clutter.
+* `spec.backoffLimit: 2`: If the container crashes, retry at most 2 times before marking the Job as failed.
+
+##### 2. The Pod Template (`spec.template`)
+* `template`: The "cookie cutter" that the Job controller uses to stamp out the actual Pod.
+* `template.spec.restartPolicy: OnFailure`: Only restart the container if it crashes (non-zero exit code). Never restart if it exits successfully with 0.
+
+##### 3. Container & Image
+* `containers[0].name: cuda-vector-add`: Identifier for the container within the Pod.
+* `containers[0].image: nvcr.io/nvidia/k8s/cuda-sample:vectoradd-cuda12.5.0-ubuntu22.04`: Official NVIDIA container from the NVIDIA Container Registry (`nvcr.io`). It runs a compiled CUDA C++ program adding 50,000 float vectors across GPU threads.
+
+##### 4. Resource Allocation (`requests` vs. `limits`)
+* `resources.requests` (The Reservation / Scheduling Floor):
+  * `cpu: "500m"`: `500m` = **500 millicores** (0.5 of a physical CPU core). Kubernetes guarantees at least half a CPU core.
+  * `memory: 512Mi`: Reserves 512 Mebibytes of host RAM.
+  * `nvidia.com/gpu: 1`: Informs the scheduler that the pod cannot be scheduled on any node with 0 free GPUs.
+* `resources.limits` (The Hard Enforcement Ceiling):
+  * `cpu: "1"`: Throttles CPU if the container exceeds 1 core.
+  * `memory: 1Gi`: The hard memory ceiling. If the container tries to allocate > 1024MiB, the Linux kernel triggers an **OOM (Out Of Memory) Kill (Exit Code 137)**.
+  * `nvidia.com/gpu: 1`: Limits the container to exactly 1 physical GPU device (`/dev/nvidia0`).
+
+---
+
+#### 6. End-to-End Execution Flow (What Happens on `kubectl apply`)
+```
+1. Engineer runs `kubectl apply -f cuda-vector-add.yaml`
+                     │
+2. Kube-API Server validates syntax and records Job object
+                     │
+3. Job Controller detects Job and creates Pod matching `template`
+                     │
+4. Kube-Scheduler inspects Pod `requests: { nvidia.com/gpu: 1 }`
+   Checks nodes: finds node with 1 allocatable GPU -> Binds Pod to Node
+                     │
+5. Kubelet on GPU Node calls NVIDIA Device Plugin via gRPC (`Allocate()`)
+   Device plugin returns device node: `/dev/nvidia0`
+                     │
+6. Containerd launches container using `nvidia-container-runtime`
+   Mounts `/dev/nvidia0` and links host `libcuda.so.1`
+                     │
+7. C++ VectorAdd binary runs on GPU CUDA cores
+   Verifies math -> Prints "Test PASSED" -> Exits with code 0
+                     │
+8. Job Controller marks Job status as `Completed`
+```
+
+---
+
+---
+
 *(Next up: Part 1.3 — Model Cache Storage & Secrets Manifests [Laptop])*
 
 
